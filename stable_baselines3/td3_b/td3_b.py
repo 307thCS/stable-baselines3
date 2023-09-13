@@ -11,7 +11,7 @@ from stable_baselines3.common.off_policy_algorithm import OffPolicyAlgorithm
 from stable_baselines3.common.policies import BasePolicy, ContinuousCritic
 from stable_baselines3.common.type_aliases import GymEnv, MaybeCallback, Schedule
 from stable_baselines3.common.utils import get_parameters_by_name, polyak_update
-from stable_baselines3.td3.policies import Actor, Critic, CnnPolicy, MlpPolicy, MultiInputPolicy, TD3BPolicy
+from stable_baselines3.td3_b.policies import Actor, Critic, CnnPolicy, MlpPolicy, MultiInputPolicy, TD3BPolicy
 
 SelfTD3 = TypeVar("SelfTD3", bound="TD3")
 
@@ -135,7 +135,7 @@ class TD3B(OffPolicyAlgorithm):
         self.policy_delay = policy_delay
         self.target_noise_clip = target_noise_clip
         self.target_policy_noise = target_policy_noise
-        self.idxrange = torch.arange(bs).to(device)
+        self.idxrange = th.arange(batch_size).to(self.device)
         
         if _init_setup_model:
             self._setup_model()
@@ -173,7 +173,7 @@ class TD3B(OffPolicyAlgorithm):
                 noise = replay_data.actions.clone().data.normal_(0, self.target_policy_noise)
                 noise = noise.clamp(-self.target_noise_clip, self.target_noise_clip)
                 next_action_candidates = self.actor_target(replay_data.next_observations)
-                candidate_values = self.critic_target.q1_forward(replay_data.next_observations, next_action_candidates, idx = 1)
+                candidate_values = self.critic_target.q1_forward(replay_data.next_observations, next_action_candidates, idx = 1).squeeze(dim=2)
                 next_actions = next_action_candidates[self.idxrange, candidate_values.argmax(dim=1)]
                 next_actions = (next_actions + noise).clamp(-1, 1)
 
