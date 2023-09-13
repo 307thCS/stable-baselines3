@@ -8,7 +8,7 @@ from stable_baselines3.her.her_replay_buffer import HerReplayBuffer
 from stable_baselines3.ppo import PPO
 from stable_baselines3.sac import SAC
 from stable_baselines3.td3 import TD3
-
+from stable_baselines3.td3_b import TD3B
 # Read version from file
 version_file = os.path.join(os.path.dirname(__file__), "version.txt")
 with open(version_file) as file_handler:
