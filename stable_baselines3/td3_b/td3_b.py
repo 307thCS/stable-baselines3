@@ -89,6 +89,10 @@ class TD3B(OffPolicyAlgorithm):
         batch_size: int = 100,
         tau: float = 0.005,
         gamma: float = 0.99,
+        contrastive_loss_mult: int = 0,
+        max_rank: float = 2.,
+        moe_bool: bool = True,
+        alt_start_points: bool = False,
         train_freq: Union[int, Tuple[int, str]] = (1, "episode"),
         gradient_steps: int = -1,
         action_noise: Optional[ActionNoise] = None,
@@ -96,11 +100,13 @@ class TD3B(OffPolicyAlgorithm):
         replay_buffer_kwargs: Optional[Dict[str, Any]] = None,
         optimize_memory_usage: bool = False,
         policy_delay: int = 2,
+        alternate: bool = False,
+        grad_printout: bool = False,
         target_policy_noise: float = 0.2,
         target_noise_clip: float = 0.5,
         stats_window_size: int = 100,
         tensorboard_log: Optional[str] = None,
-        policy_kwargs: Optional[Dict[str, Any]] = None,
+        policy_kwargs: Optional[Dict[str, Any]] = {"num_ideas": 4},
         verbose: int = 0,
         seed: Optional[int] = None,
         device: Union[th.device, str] = "auto",
@@ -131,15 +137,30 @@ class TD3B(OffPolicyAlgorithm):
             supported_action_spaces=(spaces.Box,),
             support_multi_env=True,
         )
-
+        self.grad_printout = grad_printout
         self.policy_delay = policy_delay
         self.target_noise_clip = target_noise_clip
         self.target_policy_noise = target_policy_noise
         self.idxrange = th.arange(batch_size).to(self.device)
-        
+        self.contrastive_loss_mult = contrastive_loss_mult
+        self.num_ideas = policy_kwargs["num_ideas"]
+        #self.inverse_eye = (1 - th.eye(self.num_ideas)).to(self.device)
+        self.tril = th.ones(self.num_ideas, self.num_ideas).float().to(self.device).tril(diagonal=-1)
+        self.rank_weights =  th.linspace(1, max_rank, self.num_ideas)[None, :].expand(batch_size, -1).to(self.device)
+        if alt_start_points == True:
+            self.start_points = th.ones(self.num_ideas)[None, :, None].float().to(self.device)
+            self.start_points[:, 0] = 0
+        else:
+            self.start_points = th.linspace(0, 2, self.num_ideas)[None, :, None].to(self.device) #used for contrastive loss, determines at what distance it begins applying CL
+        if max_rank == 0 or max_rank == 1:
+            self.moe_bool = False
+        else:
+            self.moe_bool = moe_bool
+        self.actor_loss_grad_norm_ema = 0
+        self.contrastive_loss_grad_norm_ema = 0
+        self.alternate = alternate
         if _init_setup_model:
             self._setup_model()
-
     def _setup_model(self) -> None:
         super()._setup_model()
         self._create_aliases()
@@ -196,14 +217,34 @@ class TD3B(OffPolicyAlgorithm):
             self.critic.optimizer.step()
 
             # Delayed policy updates
+            
             if self._n_updates % self.policy_delay == 0:
                 # Compute actor loss
-                actor_loss = -self.critic.q1_forward(replay_data.observations, self.actor(replay_data.observations)).mean()
+                actions = self.actor(replay_data.observations)
+                values = -self.critic.q1_forward(replay_data.observations, actions).squeeze(dim=2)
+                if self.moe_bool:
+                    values = self.moe_loss_adjust(values, self.rank_weights)
+                actor_loss = values.mean()
                 actor_losses.append(actor_loss.item())
-
+                if self.contrastive_loss_mult > 0 and self.alternate == False:
+                    contrastive_actor_loss = self.calculate_contrastive_loss(actions)
+                    actor_losses.append(contrastive_actor_loss.item())
+                    actor_loss += contrastive_actor_loss * self.contrastive_loss_mult
                 # Optimize the actor
+                actor_loss_grad_norm = 0
                 self.actor.optimizer.zero_grad()
                 actor_loss.backward()
+                if self.grad_printout:
+                    if self._n_updates % 40 == 0:
+                        for param in self.actor.parameters():
+                            if param.grad is not None:
+                                actor_loss_grad_norm += param.grad.data.norm(2).item()**2
+
+                        actor_loss_grad_norm = (actor_loss_grad_norm ** 0.5) / len(list(self.actor.parameters()))
+                        ema = 0.997
+                        self.actor_loss_grad_norm_ema = self.actor_loss_grad_norm_ema * ema + actor_loss_grad_norm * (1 - ema)
+                        if self._n_updates % 24000 == 0:    
+                            print(f"Actor Loss Grad Norm: {self.actor_loss_grad_norm_ema}")
                 self.actor.optimizer.step()
 
                 polyak_update(self.critic.parameters(), self.critic_target.parameters(), self.tau)
@@ -211,7 +252,26 @@ class TD3B(OffPolicyAlgorithm):
                 # Copy running stats, see GH issue #996
                 polyak_update(self.critic_batch_norm_stats, self.critic_batch_norm_stats_target, 1.0)
                 polyak_update(self.actor_batch_norm_stats, self.actor_batch_norm_stats_target, 1.0)
+            elif self._n_updates % self.policy_delay == 1 and self.alternate == True:
+                actions = self.actor(replay_data.observations)
+                contrastive_actor_loss = self.calculate_contrastive_loss(actions)
+                actor_losses.append(contrastive_actor_loss.item())
+                actor_loss = contrastive_actor_loss * self.contrastive_loss_mult
+                actor_loss_grad_norm = 0
+                self.actor.optimizer.zero_grad()
+                actor_loss.backward()
+                if self.grad_printout:
+                    if self._n_updates % 40 == 1:
+                        for param in self.actor.parameters():
+                            if param.grad is not None:
+                                actor_loss_grad_norm += param.grad.data.norm(2).item()**2
 
+                        actor_loss_grad_norm = (actor_loss_grad_norm ** 0.5) / len(list(self.actor.parameters()))
+                        ema = 0.997
+                        self.contrastive_loss_grad_norm_ema = self.contrastive_loss_grad_norm_ema * ema + actor_loss_grad_norm * (1 - ema)
+                        if self._n_updates % 24000 == 1:    
+                            print(f"Contrastive Loss Grad Norm: {self.contrastive_loss_grad_norm_ema}")
+                self.actor.optimizer.step()
         self.logger.record("train/n_updates", self._n_updates, exclude="tensorboard")
         if len(actor_losses) > 0:
             self.logger.record("train/actor_loss", np.mean(actor_losses))
@@ -241,3 +301,15 @@ class TD3B(OffPolicyAlgorithm):
     def _get_torch_save_params(self) -> Tuple[List[str], List[str]]:
         state_dicts = ["policy", "actor.optimizer", "critic.optimizer"]
         return state_dicts, []
+    def calculate_contrastive_loss(self, actions):
+        bs = actions.shape[0]
+        distances = (abs((actions.unsqueeze(dim=1) - actions.unsqueeze(dim=2).detach()))).mean(dim=3)
+        #distances = distances.flatten(start_dim=1)[:, 1:].view(bs, self.num_ideas-1, self.num_ideas+1)[:, :,:-1].reshape(bs, self.num_ideas, self.num_ideas-1)#remove diagonals
+        losses = (th.nn.functional.relu(self.start_points - distances) * self.tril) ** 2 
+        return losses.mean()
+    def moe_loss_adjust(self, values, rank_weights):
+        idxs = values.argsort(dim=1)
+        rank_tensor = th.empty_like(rank_weights).to(self.device).detach()
+        rank_tensor.scatter_(1, idxs, rank_weights)
+        values = (values * rank_tensor) / rank_tensor.mean(dim=0, keepdim=True)
+        return values

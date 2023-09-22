@@ -49,7 +49,6 @@ class Actor(BasePolicy):
             normalize_images=normalize_images,
             squash_output=True,
         )
-
         self.net_arch = net_arch
         self.features_dim = features_dim
         self.activation_fn = activation_fn
@@ -216,6 +215,7 @@ class TD3BPolicy(BasePolicy):
         optimizer_kwargs: Optional[Dict[str, Any]] = None,
         n_critics: int = 2,
         share_features_extractor: bool = False,
+        num_ideas: int = 4,
     ):
         super().__init__(
             observation_space,
@@ -247,6 +247,7 @@ class TD3BPolicy(BasePolicy):
             "normalize_images": normalize_images,
         }
         self.actor_kwargs = self.net_args.copy()
+        self.actor_kwargs["num_ideas"] = num_ideas
         self.critic_kwargs = self.net_args.copy()
         self.critic_kwargs.update(
             {
@@ -330,9 +331,6 @@ class TD3BPolicy(BasePolicy):
     def _predict(self, observation: th.Tensor, deterministic: bool = False) -> th.Tensor:
         # Note: the deterministic deterministic parameter is ignored in the case of TD3.
         #   Predictions are always deterministic.
-        bs = observation.shape[0]
-        if bs > 1:
-            raise Exception("bs should be 1")
         actions = self.actor(observation)
         values = self.critic.q1_forward(observation, actions, idx=1)
         best_action = actions[self.idxrange, values.argmax(dim=1)]
@@ -444,6 +442,7 @@ class MultiInputPolicy(TD3BPolicy):
         optimizer_kwargs: Optional[Dict[str, Any]] = None,
         n_critics: int = 2,
         share_features_extractor: bool = False,
+        num_ideas: int = 4,
     ):
         super().__init__(
             observation_space,
@@ -458,4 +457,5 @@ class MultiInputPolicy(TD3BPolicy):
             optimizer_kwargs,
             n_critics,
             share_features_extractor,
+            num_ideas,
         )
