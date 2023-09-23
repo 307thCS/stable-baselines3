@@ -53,11 +53,12 @@ class Actor(BasePolicy):
         self.features_dim = features_dim
         self.activation_fn = activation_fn
         self.num_ideas = num_ideas
+        #self.idea_mults is used to squish later actions between a v slightly smaller range than earlier actions
         self.action_dim = get_action_dim(self.action_space)
         actor_net = create_mlp(features_dim, self.action_dim * self.num_ideas, net_arch, activation_fn, squash_output=True)
         # Deterministic action
         self.mu = nn.Sequential(*actor_net)
-
+        self.idea_mults = th.linspace(1, 1 - (num_ideas - 1) * 0.01, num_ideas)[None, :, None]
     def _get_constructor_parameters(self) -> Dict[str, Any]:
         data = super()._get_constructor_parameters()
 
@@ -75,6 +76,8 @@ class Actor(BasePolicy):
         # assert deterministic, 'The TD3 actor only outputs deterministic actions'
         features = self.extract_features(obs, self.features_extractor)
         output = self.reshape_output(self.mu(features))
+        device = output.device
+        output = output * self.idea_mults.to(device)
         return output
 
     def _predict(self, observation: th.Tensor, deterministic: bool = False) -> th.Tensor:
