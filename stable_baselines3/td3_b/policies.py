@@ -58,7 +58,7 @@ class Actor(BasePolicy):
         actor_net = create_mlp(features_dim, self.action_dim * self.num_ideas, net_arch, activation_fn, squash_output=True)
         # Deterministic action
         self.mu = nn.Sequential(*actor_net)
-        self.idea_mults = th.linspace(1, 1 - (num_ideas - 1) * 0.01, num_ideas)[None, :, None]
+        self.idea_mults = th.linspace(1, 1 - (num_ideas - 1) * 0.001, num_ideas)[None, :, None]
     def _get_constructor_parameters(self) -> Dict[str, Any]:
         data = super()._get_constructor_parameters()
 
