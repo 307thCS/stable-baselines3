@@ -40,7 +40,8 @@ class Actor(BasePolicy):
         features_dim: int,
         activation_fn: Type[nn.Module] = nn.ReLU,
         normalize_images: bool = True,
-        num_ideas: int = 4
+        num_ideas: int = 4,
+        idea_squish_factor: float = 0,
     ):
         super().__init__(
             observation_space,
@@ -58,7 +59,11 @@ class Actor(BasePolicy):
         actor_net = create_mlp(features_dim, self.action_dim * self.num_ideas, net_arch, activation_fn, squash_output=True)
         # Deterministic action
         self.mu = nn.Sequential(*actor_net)
-        self.idea_mults = th.linspace(1, 1 - (num_ideas - 1) * 0.001, num_ideas)[None, :, None]
+        if idea_squish_factor > 0:
+            self.idea_mults = th.linspace(1 - (num_ideas - 1) * idea_squish_factor, 1, num_ideas)[None, :, None]
+            self.idea_squish = True
+        else:
+            self.idea_squish = False
     def _get_constructor_parameters(self) -> Dict[str, Any]:
         data = super()._get_constructor_parameters()
 
@@ -77,7 +82,8 @@ class Actor(BasePolicy):
         features = self.extract_features(obs, self.features_extractor)
         output = self.reshape_output(self.mu(features))
         device = output.device
-        output = output * self.idea_mults.to(device)
+        if self.idea_squish == True:
+            output = output * self.idea_mults.to(device)
         return output
 
     def _predict(self, observation: th.Tensor, deterministic: bool = False) -> th.Tensor:
@@ -219,6 +225,7 @@ class TD3BPolicy(BasePolicy):
         n_critics: int = 2,
         share_features_extractor: bool = False,
         num_ideas: int = 4,
+        idea_squish_factor: float = 0,
     ):
         super().__init__(
             observation_space,
@@ -250,7 +257,7 @@ class TD3BPolicy(BasePolicy):
             "normalize_images": normalize_images,
         }
         self.actor_kwargs = self.net_args.copy()
-        self.actor_kwargs["num_ideas"] = num_ideas
+        self.actor_kwargs["num_ideas"], self.actor_kwargs["idea_squish_factor"] = num_ideas, idea_squish_factor
         self.critic_kwargs = self.net_args.copy()
         self.critic_kwargs.update(
             {
@@ -446,6 +453,7 @@ class MultiInputPolicy(TD3BPolicy):
         n_critics: int = 2,
         share_features_extractor: bool = False,
         num_ideas: int = 4,
+        idea_squish_factor: float = 0,
     ):
         super().__init__(
             observation_space,
@@ -461,4 +469,5 @@ class MultiInputPolicy(TD3BPolicy):
             n_critics,
             share_features_extractor,
             num_ideas,
+            idea_squish_factor,
         )

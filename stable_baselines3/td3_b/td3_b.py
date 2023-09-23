@@ -106,7 +106,7 @@ class TD3B(OffPolicyAlgorithm):
         target_noise_clip: float = 0.5,
         stats_window_size: int = 100,
         tensorboard_log: Optional[str] = None,
-        policy_kwargs: Optional[Dict[str, Any]] = {"num_ideas": 4},
+        policy_kwargs: Optional[Dict[str, Any]] = {"num_ideas": 4, "idea_squish_factor": 0},
         verbose: int = 0,
         seed: Optional[int] = None,
         device: Union[th.device, str] = "auto",
