@@ -11,7 +11,7 @@ from stable_baselines3.common.off_policy_algorithm import OffPolicyAlgorithm
 from stable_baselines3.common.policies import BasePolicy, ContinuousCritic
 from stable_baselines3.common.type_aliases import GymEnv, MaybeCallback, Schedule
 from stable_baselines3.common.utils import get_parameters_by_name, polyak_update
-from stable_baselines3.td3_b.policies import Actor, Critic, CnnPolicy, MlpPolicy, MultiInputPolicy, TD3BPolicy
+from stable_baselines3.bit.policies import Actor, Critic, CnnPolicy, MlpPolicy, MultiInputPolicy, BITPolicy
 
 SelfTD3 = TypeVar("SelfTD3", bound="TD3")
 
@@ -19,7 +19,7 @@ SelfTD3 = TypeVar("SelfTD3", bound="TD3")
 SelfTD3 = TypeVar("SelfTD3", bound="TD3")
 
 
-class TD3B(OffPolicyAlgorithm):
+class BIT(OffPolicyAlgorithm):
     """
     Twin Delayed DDPG (TD3)
     Addressing Function Approximation Error in Actor-Critic Methods.
@@ -73,7 +73,7 @@ class TD3B(OffPolicyAlgorithm):
         "CnnPolicy": CnnPolicy,
         "MultiInputPolicy": MultiInputPolicy,
     }
-    policy: TD3BPolicy
+    policy: BITPolicy
     actor: Actor
     actor_target: Actor
     critic: Critic
@@ -81,7 +81,7 @@ class TD3B(OffPolicyAlgorithm):
 
     def __init__(
         self,
-        policy: Union[str, Type[TD3BPolicy]],
+        policy: Union[str, Type[BITPolicy]],
         env: Union[GymEnv, str],
         learning_rate: Union[float, Schedule] = 1e-3,
         buffer_size: int = 1_000_000,  # 1e6
@@ -283,7 +283,7 @@ class TD3B(OffPolicyAlgorithm):
         total_timesteps: int,
         callback: MaybeCallback = None,
         log_interval: int = 4,
-        tb_log_name: str = "TD3_B",
+        tb_log_name: str = "BIT",
         reset_num_timesteps: bool = True,
         progress_bar: bool = False,
     ) -> SelfTD3:

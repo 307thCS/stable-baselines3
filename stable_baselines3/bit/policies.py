@@ -1,6 +1,7 @@
 from typing import Any, Dict, List, Optional, Tuple, Type, Union
 
 import torch as th
+from torch.nn import functional as F
 from gymnasium import spaces
 from torch import nn
 from stable_baselines3.common.type_aliases import TensorDict
@@ -15,41 +16,6 @@ from stable_baselines3.common.torch_layers import (
     get_actor_critic_arch,
 )
 from stable_baselines3.common.type_aliases import Schedule
-
-class FixedCombinedExtractor(CombinedExtractor):
-    """
-    Combined features extractor for Dict observation spaces.
-    Builds a features extractor for each key of the space. Input from each space
-    is fed through a separate submodule (CNN or MLP, depending on input shape),
-    the output features are concatenated and fed through additional MLP network ("combined").
-
-    :param observation_space:
-    :param cnn_output_dim: Number of features to output from each CNN submodule(s). Defaults to
-        256 to avoid exploding network sizes.
-    :param normalized_image: Whether to assume that the image is already normalized
-        or not (this disables dtype and bounds checks): when True, it only checks that
-        the space is a Box and has 3 dimensions.
-        Otherwise, it checks that it has expected dtype (uint8) and bounds (values in [0, 255]).
-    """
-
-    def __init__(
-        self,
-        observation_space: spaces.Dict,
-        cnn_output_dim: int = 256,
-        normalized_image: bool = False,
-    ) -> None:
-        # TODO we do not know features-dim here before going over all the items, so put something there. This is dirty!
-        super().__init__(observation_space, cnn_output_dim, normalized_image)
-
-    def forward(self, observations: TensorDict) -> th.Tensor:
-        encoded_tensor_list = []
-
-        for key, extractor in self.extractors.items():
-            element = observations[key]
-            if len(element.shape) == 0:
-                element = np.expand_dims(element, axis=0)
-            encoded_tensor_list.append(extractor(element))
-        return th.cat(encoded_tensor_list, dim=1)
 
 class Actor(BasePolicy):
     """
@@ -213,14 +179,75 @@ class Critic(BaseModel):
         """
         with th.no_grad():
             features = self.extract_features(obs, self.features_extractor)
-        if len(actions.shape) == 3:
-            features = th.stack(tuple([features for i in range(actions.shape[1])]), dim=1)
-            qvalue_input = th.cat([features, actions], dim=2)
-        else:
-            qvalue_input = th.cat([features, actions], dim=1)
+        features = th.stack(tuple([features for i in range(actions.shape[1])]), dim=1)
+        qvalue_input = th.cat([features, actions], dim=2)
         return self.q_networks[idx](qvalue_input)
 
-class TD3BPolicy(BasePolicy):
+class Policy(BaseModel):
+    """
+    Critic network(s) for DDPG/SAC/TD3.
+    It represents the action-state value function (Q-value function).
+    Compared to A2C/PPO critics, this one represents the Q-value
+    and takes the continuous action as input. It is concatenated with the state
+    and then fed to the network which outputs a single value: Q(s, a).
+    For more recent algorithms like SAC/TD3, multiple networks
+    are created to give different estimates.
+
+    By default, it creates two critic networks used to reduce overestimation
+    thanks to clipped Q-learning (cf TD3 paper).
+
+    :param observation_space: Obervation space
+    :param action_space: Action space
+    :param net_arch: Network architecture
+    :param features_extractor: Network to extract features
+        (a CNN when using images, a nn.Flatten() layer otherwise)
+    :param features_dim: Number of features
+    :param activation_fn: Activation function
+    :param normalize_images: Whether to normalize images or not,
+         dividing by 255.0 (True by default)
+    :param n_critics: Number of critic networks to create.
+    :param share_features_extractor: Whether the features extractor is shared or not
+        between the actor and the critic (this saves computation time)
+    """
+
+    def __init__(
+        self,
+        observation_space: spaces.Space,
+        action_space: spaces.Box,
+        net_arch: List[int],
+        features_extractor: BaseFeaturesExtractor,
+        features_dim: int,
+        activation_fn: Type[nn.Module] = nn.ReLU,
+        normalize_images: bool = True,
+        share_features_extractor: bool = True,
+    ):
+        super().__init__(
+            observation_space,
+            action_space,
+            features_extractor=features_extractor,
+            normalize_images=normalize_images,
+        )
+
+        action_dim = get_action_dim(self.action_space)
+
+        self.share_features_extractor = share_features_extractor
+        policy_net = create_mlp(features_dim + action_dim, 1, net_arch, activation_fn)
+        self.policy_net = nn.Sequential(*policy_net)
+
+    def forward(self, obs: th.Tensor, actions: th.Tensor) -> Tuple[th.Tensor, ...]:
+        # Learn the features extractor using the policy loss only
+        # when the features_extractor is shared with the actor
+        with th.set_grad_enabled(not self.share_features_extractor):
+            features = self.extract_features(obs, self.features_extractor)
+        if len(actions.shape) == 3:
+            features = th.stack(tuple([features for i in range(actions.shape[1])]), dim=1)
+            state = th.cat([features, actions], dim=2)
+        else:
+            state = th.cat([features, actions], dim=1)
+        return self.policy_net(state)
+
+
+class BITPolicy(BasePolicy):
     """
     Policy class (with both actor and critic) for TD3.
 
@@ -247,7 +274,8 @@ class TD3BPolicy(BasePolicy):
     actor_target: Actor
     critic: Critic
     critic_target: Critic
-
+    policy: Policy
+    policy_target: Policy
     def __init__(
         self,
         observation_space: spaces.Space,
@@ -304,6 +332,7 @@ class TD3BPolicy(BasePolicy):
                 "share_features_extractor": share_features_extractor,
             }
         )
+        self.policy_kwargs = self.net_args.copy()
 
         self.share_features_extractor = share_features_extractor
         self.idxrange = th.arange(1)
@@ -342,7 +371,9 @@ class TD3BPolicy(BasePolicy):
             lr=lr_schedule(1),  # type: ignore[call-arg]
             **self.optimizer_kwargs,
         )
-
+        self.policy = self.make_policy(features_extractor=None)
+        self.policy_target = self.make_policy(features_extractor=None)
+        
         # Target networks should always be in eval mode
         self.actor_target.set_training_mode(False)
         self.critic_target.set_training_mode(False)
@@ -372,6 +403,10 @@ class TD3BPolicy(BasePolicy):
     def make_critic(self, features_extractor: Optional[BaseFeaturesExtractor] = None) -> Critic:
         critic_kwargs = self._update_features_extractor(self.critic_kwargs, features_extractor)
         return Critic(**critic_kwargs).to(self.device)
+        
+    def make_policy(self, features_extractor: Optional[BaseFeaturesExtractor] = None) -> Policy:
+        policy_kwargs = self._update_features_extractor(self.policy_kwargs, features_extractor)
+        return Policy(**policy_kwargs).to(self.device)
 
     def forward(self, observation: th.Tensor, deterministic: bool = False) -> th.Tensor:
         return self._predict(observation, deterministic=deterministic)
@@ -380,8 +415,9 @@ class TD3BPolicy(BasePolicy):
         # Note: the deterministic deterministic parameter is ignored in the case of TD3.
         #   Predictions are always deterministic.
         actions = self.actor(observation)
-        values = self.critic.q1_forward(observation, actions, idx=1)
-        best_action = actions[self.idxrange, values.argmax(dim=1)]
+        probs = F.softmax(self.policy(observation, actions), dim=1).squeeze(dim=2)
+        action_index = th.multinomial(probs, num_samples = 1)
+        best_action = actions[self.idxrange, action_index]
         return best_action
 
     def set_training_mode(self, mode: bool) -> None:
@@ -397,9 +433,9 @@ class TD3BPolicy(BasePolicy):
         self.training = mode
 
 
-MlpPolicy = TD3BPolicy
+MlpPolicy = BITPolicy
 
-class CnnPolicy(TD3BPolicy):
+class CnnPolicy(BITPolicy):
     """
     Policy class (with both actor and critic) for TD3.
 
@@ -453,7 +489,7 @@ class CnnPolicy(TD3BPolicy):
         )
 
 
-class MultiInputPolicy(TD3BPolicy):
+class MultiInputPolicy(BITPolicy):
     """
     Policy class (with both actor and critic) for TD3 to be used with Dict observation spaces.
 
