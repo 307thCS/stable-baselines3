@@ -373,11 +373,17 @@ class BITPolicy(BasePolicy):
         )
         self.policy = self.make_policy(features_extractor=None)
         self.policy_target = self.make_policy(features_extractor=None)
+        self.policy_target.load_state_dict(self.policy.state_dict())
         
+        self.policy.optimizer = self.optimizer_class(
+            self.policy.parameters(),
+            lr=lr_schedule(1),  # type: ignore[call-arg]
+            **self.optimizer_kwargs,
+        )
         # Target networks should always be in eval mode
         self.actor_target.set_training_mode(False)
         self.critic_target.set_training_mode(False)
-
+        self.policy_target.set_training_mode(False)
     def _get_constructor_parameters(self) -> Dict[str, Any]:
         data = super()._get_constructor_parameters()
 
@@ -430,6 +436,7 @@ class BITPolicy(BasePolicy):
         """
         self.actor.set_training_mode(mode)
         self.critic.set_training_mode(mode)
+        self.policy.set_training_mode(mode)
         self.training = mode
 
 

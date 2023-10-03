@@ -93,6 +93,8 @@ class BIT(OffPolicyAlgorithm):
         max_rank: float = 2.,
         moe_bool: bool = False,
         alt_start_points: bool = True,
+        policy_update: int = 500,
+        policy_temp: float = 1.,
         train_freq: Union[int, Tuple[int, str]] = (1, "episode"),
         gradient_steps: int = -1,
         action_noise: Optional[ActionNoise] = None,
@@ -100,7 +102,6 @@ class BIT(OffPolicyAlgorithm):
         replay_buffer_kwargs: Optional[Dict[str, Any]] = None,
         optimize_memory_usage: bool = False,
         policy_delay: int = 2,
-        alternate: bool = False,
         grad_printout: bool = False,
         target_policy_noise: float = 0.2,
         target_noise_clip: float = 0.5,
@@ -144,6 +145,8 @@ class BIT(OffPolicyAlgorithm):
         self.idxrange = th.arange(batch_size).to(self.device)
         self.contrastive_loss_mult = contrastive_loss_mult
         self.num_ideas = policy_kwargs["num_ideas"]
+        self.policy_update, self.policy_temp = policy_update, policy_temp
+        self.printout_interval = 50000
         #self.inverse_eye = (1 - th.eye(self.num_ideas)).to(self.device)
         #self.tril = self.inverse_eye
         self.tril = th.ones(self.num_ideas, self.num_ideas).float().to(self.device).tril(diagonal=-1)
@@ -159,7 +162,6 @@ class BIT(OffPolicyAlgorithm):
             self.moe_bool = moe_bool
         self.actor_loss_grad_norm_ema = 0
         self.contrastive_loss_grad_norm_ema = 0
-        self.alternate = alternate
         if _init_setup_model:
             self._setup_model()
     def _setup_model(self) -> None:
@@ -176,17 +178,22 @@ class BIT(OffPolicyAlgorithm):
         self.actor_target = self.policy.actor_target
         self.critic = self.policy.critic
         self.critic_target = self.policy.critic_target
-
+        self.policy_net = self.policy.policy
+        self.policy_net_target = self.policy.policy_target
     def train(self, gradient_steps: int, batch_size: int = 100) -> None:
         # Switch to train mode (this affects batch norm / dropout)
         self.policy.set_training_mode(True)
 
         # Update learning rate according to lr schedule
-        self._update_learning_rate([self.actor.optimizer, self.critic.optimizer])
+        self._update_learning_rate([self.actor.optimizer, self.critic.optimizer, self.policy_net.optimizer])
 
         actor_losses, critic_losses = [], []
         for _ in range(gradient_steps):
             self._n_updates += 1
+            if self._n_updates % (self.printout_interval * self.policy_delay) == 0:
+                printout = True
+            else:
+                printout = False
             # Sample replay buffer
             replay_data = self.replay_buffer.sample(batch_size, env=self._vec_normalize_env)  # type: ignore[union-attr]
 
@@ -222,12 +229,13 @@ class BIT(OffPolicyAlgorithm):
             if self._n_updates % self.policy_delay == 0:
                 # Compute actor loss
                 actions = self.actor(replay_data.observations)
-                values = -self.critic.q1_forward(replay_data.observations, actions).squeeze(dim=2)
+                base_values = self.critic.q1_forward(replay_data.observations, actions)
+                values = -base_values.squeeze(dim=2)
                 if self.moe_bool:
                     values = self.moe_loss_adjust(values, self.rank_weights)
                 actor_loss = values.mean()
                 actor_losses.append(actor_loss.item())
-                if self.contrastive_loss_mult > 0 and self.alternate == False:
+                if self.contrastive_loss_mult > 0:
                     contrastive_actor_loss = self.calculate_contrastive_loss(actions)
                     actor_losses.append(contrastive_actor_loss.item())
                     actor_loss += contrastive_actor_loss * self.contrastive_loss_mult
@@ -247,32 +255,33 @@ class BIT(OffPolicyAlgorithm):
                         if self._n_updates % 24000 == 0:    
                             print(f"Actor Loss Grad Norm: {self.actor_loss_grad_norm_ema}")
                 self.actor.optimizer.step()
-
+                
+                base_logits = self.policy_net(replay_data.observations, actions.detach())
+                with th.no_grad():
+                    old_logits = self.policy_net_target(replay_data.observations, actions.detach())
+                    target_policy = self.adjust_policy(F.softmax(old_logits, dim=1), base_values.detach())
+                policy_loss = self.log_loss(base_logits, target_policy.detach())
+                
+                self.policy_net.optimizer.zero_grad()
+                policy_loss.backward()
+                self.policy_net.optimizer.step()
+                
                 polyak_update(self.critic.parameters(), self.critic_target.parameters(), self.tau)
                 polyak_update(self.actor.parameters(), self.actor_target.parameters(), self.tau)
                 # Copy running stats, see GH issue #996
                 polyak_update(self.critic_batch_norm_stats, self.critic_batch_norm_stats_target, 1.0)
                 polyak_update(self.actor_batch_norm_stats, self.actor_batch_norm_stats_target, 1.0)
-            elif self._n_updates % self.policy_delay == 1 and self.alternate == True:
-                actions = self.actor(replay_data.observations)
-                contrastive_actor_loss = self.calculate_contrastive_loss(actions)
-                actor_losses.append(contrastive_actor_loss.item())
-                actor_loss = contrastive_actor_loss * self.contrastive_loss_mult
-                actor_loss_grad_norm = 0
-                self.actor.optimizer.zero_grad()
-                actor_loss.backward()
-                if self.grad_printout:
-                    if self._n_updates % 40 == 1:
-                        for param in self.actor.parameters():
-                            if param.grad is not None:
-                                actor_loss_grad_norm += param.grad.data.norm(2).item()**2
-
-                        actor_loss_grad_norm = (actor_loss_grad_norm ** 0.5) / len(list(self.actor.parameters()))
-                        ema = 0.997
-                        self.contrastive_loss_grad_norm_ema = self.contrastive_loss_grad_norm_ema * ema + actor_loss_grad_norm * (1 - ema)
-                        if self._n_updates % 24000 == 1:    
-                            print(f"Contrastive Loss Grad Norm: {self.contrastive_loss_grad_norm_ema}")
-                self.actor.optimizer.step()
+                if printout == True:
+                    current_policy_slice = F.softmax(base_logits[0:1], dim=1).detach().squeeze().cpu()
+                    self.print_percentages("\ncurrent policy:", current_policy_slice)
+                    target_policy_slice = target_policy[0].detach().squeeze().cpu()
+                    self.print_percentages("target policy:", target_policy_slice)
+                    adjustments = target_policy_slice - current_policy_slice
+                    self.print_percentages("adjustments:", adjustments, digits=2)
+                
+            if self._n_updates % self.policy_update == 0:
+                self.policy_net_target.load_state_dict(self.policy_net.state_dict())
+                
         self.logger.record("train/n_updates", self._n_updates, exclude="tensorboard")
         if len(actor_losses) > 0:
             self.logger.record("train/actor_loss", np.mean(actor_losses))
@@ -314,3 +323,18 @@ class BIT(OffPolicyAlgorithm):
         rank_tensor.scatter_(1, idxs, rank_weights)
         values = (values * rank_tensor) / rank_tensor.mean(dim=0, keepdim=True)
         return values
+    def adjust_policy(self, old_probs, values):
+        a_values = values - (values * old_probs).sum(dim=1, keepdim=True)
+        adjustments = a_values * self.policy_temp
+        new_probs = old_probs + adjustments
+        new_probs = F.relu(new_probs)
+        new_probs = new_probs / new_probs.sum(dim=1, keepdim=True)
+        return new_probs
+    def log_loss(self, pred_logits, targets):
+        log_p = F.log_softmax(pred_logits, dim=1)
+        loss = (-targets * log_p)
+        loss = loss.sum(dim=1).mean()
+        return loss
+    def print_percentages(self, name, probs, digits=1):
+        str_probs = [str(round(probs[i].tolist() * 100, digits)) + "%" for i in range(probs.shape[0])]
+        print(name, str_probs)
