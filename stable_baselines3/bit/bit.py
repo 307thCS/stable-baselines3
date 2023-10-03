@@ -95,6 +95,7 @@ class BIT(OffPolicyAlgorithm):
         alt_start_points: bool = True,
         policy_update: int = 500,
         policy_temp: float = 1.,
+        printout_interval: int = 50000,
         train_freq: Union[int, Tuple[int, str]] = (1, "episode"),
         gradient_steps: int = -1,
         action_noise: Optional[ActionNoise] = None,
@@ -146,7 +147,7 @@ class BIT(OffPolicyAlgorithm):
         self.contrastive_loss_mult = contrastive_loss_mult
         self.num_ideas = policy_kwargs["num_ideas"]
         self.policy_update, self.policy_temp = policy_update, policy_temp
-        self.printout_interval = 50000
+        self.printout_interval = printout_interval
         #self.inverse_eye = (1 - th.eye(self.num_ideas)).to(self.device)
         #self.tril = self.inverse_eye
         self.tril = th.ones(self.num_ideas, self.num_ideas).float().to(self.device).tril(diagonal=-1)
@@ -272,13 +273,16 @@ class BIT(OffPolicyAlgorithm):
                 polyak_update(self.critic_batch_norm_stats, self.critic_batch_norm_stats_target, 1.0)
                 polyak_update(self.actor_batch_norm_stats, self.actor_batch_norm_stats_target, 1.0)
                 if printout == True:
-                    current_policy_slice = F.softmax(base_logits[0:1], dim=1).detach().squeeze().cpu()
-                    self.print_percentages("\ncurrent policy:", current_policy_slice)
+                    old_probs = F.softmax(old_logits, dim=1)
+                    old_policy_slice = old_probs[0].detach().squeeze().cpu()
+                    self.print_percentages("\nold policy:", old_policy_slice)
                     target_policy_slice = target_policy[0].detach().squeeze().cpu()
                     self.print_percentages("target policy:", target_policy_slice)
-                    adjustments = target_policy_slice - current_policy_slice
+                    adjustments = target_policy_slice - old_policy_slice
                     self.print_percentages("adjustments:", adjustments, digits=2)
-                
+                    a_values = base_values - (base_values * old_probs).sum(dim=1, keepdim=True)
+                    moves_and_values = th.cat((actions[0], a_values[0]), dim=1).detach().squeeze().cpu()
+                    self.print_matrix("actions:", moves_and_values, digits=2)
             if self._n_updates % self.policy_update == 0:
                 self.policy_net_target.load_state_dict(self.policy_net.state_dict())
                 
@@ -338,3 +342,18 @@ class BIT(OffPolicyAlgorithm):
     def print_percentages(self, name, probs, digits=1):
         str_probs = [str(round(probs[i].tolist() * 100, digits)) + "%" for i in range(probs.shape[0])]
         print(name, str_probs)
+    def print_matrix(self, name, numbers, digits=1):
+        numbers_list = []
+        for i in range(numbers.shape[0]):
+            str_list = [str(round(numbers[i][j].tolist(), digits)) for j in range(numbers.shape[1])]
+            for k in range(len(str_list)):
+                if str_list[k][0] != '-':
+                    str_list[k] = '+' + str_list[k]
+                if len(str_list[k]) != 3 + digits:
+                    str_list[k] = str_list[k] + '0'
+                if k == len(str_list) - 1:
+                    str_list[k] = 'advantage: ' + str_list[k]
+            numbers_list.append(str_list)
+        print(name)
+        for i in range(len(numbers_list)):
+            print(numbers_list[i])
