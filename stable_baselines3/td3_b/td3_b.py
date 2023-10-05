@@ -189,6 +189,8 @@ class TD3B(OffPolicyAlgorithm):
         self._update_learning_rate([self.actor.optimizer, self.critic.optimizer])
         if self.policy.epsilon > self.min_epsilon:
             self.policy.epsilon -= self.epsilon_decrement * gradient_steps
+            if self.policy.epsilon < self.min_epsilon:
+                self.policy.epsilon = self.min_epsilon
         actor_losses, critic_losses = [], []
         for _ in range(gradient_steps):
             self._n_updates += 1
