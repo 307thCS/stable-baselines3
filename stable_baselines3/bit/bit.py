@@ -260,7 +260,8 @@ class BIT(OffPolicyAlgorithm):
                 base_logits = self.policy_net(replay_data.observations, actions.detach())
                 with th.no_grad():
                     old_logits = self.policy_net_target(replay_data.observations, actions.detach())
-                    target_policy = self.adjust_policy(F.softmax(old_logits, dim=1), base_values.detach())
+                    base_values_2 = self.critic.q1_forward(replay_data.observations, actions, idx = 1).detach()
+                    target_policy = self.adjust_policy(F.softmax(old_logits, dim=1), base_values_2.detach())
                 policy_loss = self.log_loss(base_logits, target_policy.detach())
                 
                 self.policy_net.optimizer.zero_grad()
@@ -280,7 +281,7 @@ class BIT(OffPolicyAlgorithm):
                     self.print_percentages("target policy:", target_policy_slice)
                     adjustments = target_policy_slice - old_policy_slice
                     self.print_percentages("adjustments:", adjustments, digits=2)
-                    a_values = base_values - (base_values * old_probs).sum(dim=1, keepdim=True)
+                    a_values = base_values_2 - (base_values_2 * old_probs).sum(dim=1, keepdim=True)
                     moves_and_values = th.cat((actions[0], a_values[0]), dim=1).detach().squeeze().cpu()
                     self.print_matrix("actions:", moves_and_values, digits=2)
             if self._n_updates % self.policy_update == 0:

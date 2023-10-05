@@ -1,6 +1,7 @@
 from typing import Any, Dict, List, Optional, Tuple, Type, Union
 
 import torch as th
+import numpy as np
 from gymnasium import spaces
 from torch import nn
 from stable_baselines3.common.type_aliases import TensorDict
@@ -380,8 +381,12 @@ class TD3BPolicy(BasePolicy):
         # Note: the deterministic deterministic parameter is ignored in the case of TD3.
         #   Predictions are always deterministic.
         actions = self.actor(observation)
-        values = self.critic.q1_forward(observation, actions, idx=1)
-        best_action = actions[self.idxrange, values.argmax(dim=1)]
+        if np.random.rand() > self.epsilon:
+            values = self.critic.q1_forward(observation, actions, idx=1)
+            max_index = values.argmax(dim=1)
+        else:
+            max_index = th.randint(actions.shape[1], (1, 1))
+        best_action = actions[self.idxrange, max_index]
         return best_action
 
     def set_training_mode(self, mode: bool) -> None:

@@ -93,6 +93,9 @@ class TD3B(OffPolicyAlgorithm):
         max_rank: float = 2.,
         moe_bool: bool = False,
         alt_start_points: bool = True,
+        start_epsilon: float = 1.,
+        min_epsilon: float = 0.,
+        min_epsilon_by: float = 0.5,
         train_freq: Union[int, Tuple[int, str]] = (1, "episode"),
         gradient_steps: int = -1,
         action_noise: Optional[ActionNoise] = None,
@@ -144,6 +147,7 @@ class TD3B(OffPolicyAlgorithm):
         self.idxrange = th.arange(batch_size).to(self.device)
         self.contrastive_loss_mult = contrastive_loss_mult
         self.num_ideas = policy_kwargs["num_ideas"]
+        self.start_epsilon, self.min_epsilon, self.min_epsilon_by = start_epsilon, min_epsilon, min_epsilon_by
         #self.inverse_eye = (1 - th.eye(self.num_ideas)).to(self.device)
         #self.tril = self.inverse_eye
         self.tril = th.ones(self.num_ideas, self.num_ideas).float().to(self.device).tril(diagonal=-1)
@@ -183,7 +187,8 @@ class TD3B(OffPolicyAlgorithm):
 
         # Update learning rate according to lr schedule
         self._update_learning_rate([self.actor.optimizer, self.critic.optimizer])
-
+        if self.policy.epsilon > self.min_epsilon:
+            self.policy.epsilon -= self.epsilon_decrement * gradient_steps
         actor_losses, critic_losses = [], []
         for _ in range(gradient_steps):
             self._n_updates += 1
@@ -287,6 +292,8 @@ class TD3B(OffPolicyAlgorithm):
         reset_num_timesteps: bool = True,
         progress_bar: bool = False,
     ) -> SelfTD3:
+        self.policy.epsilon = self.start_epsilon
+        self.epsilon_decrement = (self.start_epsilon - self.min_epsilon) / ((total_timesteps - self.learning_starts) * self.min_epsilon_by)
         return super().learn(
             total_timesteps=total_timesteps,
             callback=callback,
