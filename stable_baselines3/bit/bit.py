@@ -263,7 +263,8 @@ class BIT(OffPolicyAlgorithm):
                     base_values_2 = self.critic.q1_forward(replay_data.observations, actions, idx = 1).detach()
                     target_policy = self.adjust_policy(F.softmax(old_logits, dim=1), base_values_2.detach())
                 policy_loss = self.log_loss(base_logits, target_policy.detach())
-                
+                regularization_loss = self.regularization_loss(base_logits)
+                policy_loss = policy_loss + regularization_loss
                 self.policy_net.optimizer.zero_grad()
                 policy_loss.backward()
                 self.policy_net.optimizer.step()
@@ -274,16 +275,20 @@ class BIT(OffPolicyAlgorithm):
                 polyak_update(self.critic_batch_norm_stats, self.critic_batch_norm_stats_target, 1.0)
                 polyak_update(self.actor_batch_norm_stats, self.actor_batch_norm_stats_target, 1.0)
                 if printout == True:
+                    print("log loss:", policy_loss - regularization_loss)
+                    print("regularization loss:", regularization_loss)
+                    print("logits:", [round(i, 2) for i in old_logits[0].detach().squeeze().cpu().tolist()])
                     old_probs = F.softmax(old_logits, dim=1)
                     old_policy_slice = old_probs[0].detach().squeeze().cpu()
-                    self.print_percentages("\nold policy:", old_policy_slice)
+                    self.print_percentages("old policy:   ", old_policy_slice)
                     target_policy_slice = target_policy[0].detach().squeeze().cpu()
                     self.print_percentages("target policy:", target_policy_slice)
                     adjustments = target_policy_slice - old_policy_slice
-                    self.print_percentages("adjustments:", adjustments, digits=2)
+                    self.print_percentages("adjustments:  ", adjustments, digits=2)
                     a_values = base_values_2 - (base_values_2 * old_probs).sum(dim=1, keepdim=True)
                     moves_and_values = th.cat((actions[0], a_values[0]), dim=1).detach().squeeze().cpu()
                     self.print_matrix("actions:", moves_and_values, digits=2)
+                    print("")
             if self._n_updates % self.policy_update == 0:
                 self.policy_net_target.load_state_dict(self.policy_net.state_dict())
                 
@@ -339,6 +344,12 @@ class BIT(OffPolicyAlgorithm):
         log_p = F.log_softmax(pred_logits, dim=1)
         loss = (-targets * log_p)
         loss = loss.sum(dim=1).mean()
+        return loss
+    def regularization_loss(self, logits):
+        loss = (logits.mean() ** 2) / 100
+        return loss
+    def regularization_loss_2(self, logits):
+        loss = (logits ** 2).mean() / 1000
         return loss
     def print_percentages(self, name, probs, digits=1):
         str_probs = [str(round(probs[i].tolist() * 100, digits)) + "%" for i in range(probs.shape[0])]

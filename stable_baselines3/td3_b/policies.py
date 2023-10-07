@@ -1,7 +1,7 @@
 from typing import Any, Dict, List, Optional, Tuple, Type, Union
+import random
 
 import torch as th
-import numpy as np
 from gymnasium import spaces
 from torch import nn
 from stable_baselines3.common.type_aliases import TensorDict
@@ -16,41 +16,6 @@ from stable_baselines3.common.torch_layers import (
     get_actor_critic_arch,
 )
 from stable_baselines3.common.type_aliases import Schedule
-
-class FixedCombinedExtractor(CombinedExtractor):
-    """
-    Combined features extractor for Dict observation spaces.
-    Builds a features extractor for each key of the space. Input from each space
-    is fed through a separate submodule (CNN or MLP, depending on input shape),
-    the output features are concatenated and fed through additional MLP network ("combined").
-
-    :param observation_space:
-    :param cnn_output_dim: Number of features to output from each CNN submodule(s). Defaults to
-        256 to avoid exploding network sizes.
-    :param normalized_image: Whether to assume that the image is already normalized
-        or not (this disables dtype and bounds checks): when True, it only checks that
-        the space is a Box and has 3 dimensions.
-        Otherwise, it checks that it has expected dtype (uint8) and bounds (values in [0, 255]).
-    """
-
-    def __init__(
-        self,
-        observation_space: spaces.Dict,
-        cnn_output_dim: int = 256,
-        normalized_image: bool = False,
-    ) -> None:
-        # TODO we do not know features-dim here before going over all the items, so put something there. This is dirty!
-        super().__init__(observation_space, cnn_output_dim, normalized_image)
-
-    def forward(self, observations: TensorDict) -> th.Tensor:
-        encoded_tensor_list = []
-
-        for key, extractor in self.extractors.items():
-            element = observations[key]
-            if len(element.shape) == 0:
-                element = np.expand_dims(element, axis=0)
-            encoded_tensor_list.append(extractor(element))
-        return th.cat(encoded_tensor_list, dim=1)
 
 class Actor(BasePolicy):
     """
@@ -381,11 +346,11 @@ class TD3BPolicy(BasePolicy):
         # Note: the deterministic deterministic parameter is ignored in the case of TD3.
         #   Predictions are always deterministic.
         actions = self.actor(observation)
-        if np.random.rand() > self.epsilon:
+        if random.uniform(0, 1) > self.epsilon:
             values = self.critic.q1_forward(observation, actions, idx=1)
             max_index = values.argmax(dim=1)
         else:
-            max_index = th.randint(actions.shape[1], (1, 1))
+            max_index = random.randint(0, actions.shape[1] - 1)
         best_action = actions[self.idxrange, max_index]
         return best_action
 
