@@ -63,6 +63,11 @@ class Actor(BasePolicy):
         if idea_squish_factor > 0:
             self.idea_mults = th.linspace(1 - (num_ideas - 1) * idea_squish_factor, 1, num_ideas)[None, :, None]
             self.idea_squish = True
+            print(self.idea_mults)
+        elif idea_squish_factor < 0:
+            self.idea_mults = th.linspace(1, 1 - (num_ideas - 1) * -idea_squish_factor, num_ideas)[None, :, None]
+            self.idea_squish = True
+            print(self.idea_mults)
         else:
             self.idea_squish = False
     def _get_constructor_parameters(self) -> Dict[str, Any]:
