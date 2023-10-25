@@ -1,6 +1,6 @@
 import gymnasium as gym
 import numpy as np
-from gymnasium import ObservationWrapper
+from gymnasium import Wrapper, ObservationWrapper
 from gymnasium.spaces import Box
 
 class FixDMCSObsWrapper(ObservationWrapper):
@@ -15,3 +15,14 @@ class FixDMCSObsWrapper(ObservationWrapper):
         for key in self.zero_keys:
             obs[key] = np.expand_dims(obs[key], axis=0)
         return obs
+        
+class SkipFrameWrapper(Wrapper):
+    def __init__(self, env, num_steps = 2):
+        super().__init__(env)
+        self.num_steps = num_steps
+    def step(self, action):
+        for i in range(self.num_steps):
+            obs, reward, terminated, truncated, info = self.env.step(action)
+            if terminated == True or truncated == True:
+                return obs, reward, terminated, truncated, info
+        return obs, reward, terminated, truncated, info

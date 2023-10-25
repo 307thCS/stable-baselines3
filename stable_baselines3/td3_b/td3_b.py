@@ -93,6 +93,7 @@ class TD3B(OffPolicyAlgorithm):
         max_rank: float = 2.,
         moe_bool: bool = False,
         alt_start_points: bool = True,
+        argmax_fraction: int = 1.,
         start_epsilon: float = 1.,
         min_epsilon: float = 0.01,
         min_epsilon_by: float = 0.5,
@@ -103,7 +104,6 @@ class TD3B(OffPolicyAlgorithm):
         replay_buffer_kwargs: Optional[Dict[str, Any]] = None,
         optimize_memory_usage: bool = False,
         policy_delay: int = 2,
-        alternate: bool = False,
         grad_printout: bool = False,
         target_policy_noise: float = 0.2,
         target_noise_clip: float = 0.5,
@@ -141,6 +141,7 @@ class TD3B(OffPolicyAlgorithm):
             support_multi_env=True,
         )
         self.grad_printout = grad_printout
+        self.argmax_fraction = argmax_fraction
         self.policy_delay = policy_delay
         self.target_noise_clip = target_noise_clip
         self.target_policy_noise = target_policy_noise
@@ -148,6 +149,7 @@ class TD3B(OffPolicyAlgorithm):
         self.contrastive_loss_mult = contrastive_loss_mult
         self.num_ideas = policy_kwargs["num_ideas"]
         self.start_epsilon, self.min_epsilon, self.min_epsilon_by = start_epsilon, min_epsilon, min_epsilon_by
+        self.actions_grad_ema = 0.1
         #self.inverse_eye = (1 - th.eye(self.num_ideas)).to(self.device)
         #self.tril = self.inverse_eye
         self.tril = th.ones(self.num_ideas, self.num_ideas).float().to(self.device).tril(diagonal=-1)
@@ -163,7 +165,6 @@ class TD3B(OffPolicyAlgorithm):
             self.moe_bool = moe_bool
         self.actor_loss_grad_norm_ema = 0
         self.contrastive_loss_grad_norm_ema = 0
-        self.alternate = alternate
         if _init_setup_model:
             self._setup_model()
     def _setup_model(self) -> None:
@@ -199,16 +200,20 @@ class TD3B(OffPolicyAlgorithm):
 
             with th.no_grad():
                 # Select action according to policy and add clipped noise
-                noise = replay_data.actions.clone().data.normal_(0, self.target_policy_noise)
-                noise = noise.clamp(-self.target_noise_clip, self.target_noise_clip)
+                #noise = replay_data.actions.clone().data.normal_(0, self.target_policy_noise)
+                #noise = noise.clamp(-self.target_noise_clip, self.target_noise_clip)
                 next_action_candidates = self.actor_target(replay_data.next_observations)
                 candidate_values = self.critic_target.q1_forward(replay_data.next_observations, next_action_candidates, idx = 1).squeeze(dim=2)
-                next_actions = next_action_candidates[self.idxrange, candidate_values.argmax(dim=1)]
+                max_indexes = candidate_values.argmax(dim=1)
+                next_actions = next_action_candidates[self.idxrange, max_indexes]
+                #if self.argmax_fraction < 1:
+                #    candidate_indexes = self.random_replace(candidate_indexes)
+                noise = next_actions.clone().data.normal_(0, self.target_policy_noise)
+                noise = noise.clamp(-self.target_noise_clip, self.target_noise_clip)
                 next_actions = (next_actions + noise).clamp(-1, 1)
-
-                # Compute the next Q-values: min over all critics targets
                 next_q_values = th.cat(self.critic_target(replay_data.next_observations, next_actions), dim=1)
                 next_q_values, _ = th.min(next_q_values, dim=1, keepdim=True)
+                #next_q_values = next_q_values[self.idxrange, max_indexes] * self.argmax_fraction + next_q_values.mean(dim=1) * (1 - self.argmax_fraction) 
                 target_q_values = replay_data.rewards + (1 - replay_data.dones) * self.gamma * next_q_values
 
             # Get current Q-values estimates for each critic network
@@ -229,19 +234,21 @@ class TD3B(OffPolicyAlgorithm):
             if self._n_updates % self.policy_delay == 0:
                 # Compute actor loss
                 actions = self.actor(replay_data.observations)
+                #actions.retain_grad()
                 values = -self.critic.q1_forward(replay_data.observations, actions).squeeze(dim=2)
                 if self.moe_bool:
                     values = self.moe_loss_adjust(values, self.rank_weights)
                 actor_loss = values.mean()
                 actor_losses.append(actor_loss.item())
-                if self.contrastive_loss_mult > 0 and self.alternate == False:
+                if self.contrastive_loss_mult > 0:
                     contrastive_actor_loss = self.calculate_contrastive_loss(actions)
                     actor_losses.append(contrastive_actor_loss.item())
-                    actor_loss += contrastive_actor_loss * self.contrastive_loss_mult
+                    actor_loss += contrastive_actor_loss * self.contrastive_loss_mult# * (1 + self.actions_grad_ema * 10)
                 # Optimize the actor
                 actor_loss_grad_norm = 0
                 self.actor.optimizer.zero_grad()
                 actor_loss.backward()
+                #self.actions_grad_ema = self.actions_grad_ema * 0.99 + actions.grad.norm()
                 if self.grad_printout:
                     if self._n_updates % 40 == 0:
                         for param in self.actor.parameters():
@@ -251,7 +258,10 @@ class TD3B(OffPolicyAlgorithm):
                         actor_loss_grad_norm = (actor_loss_grad_norm ** 0.5) / len(list(self.actor.parameters()))
                         ema = 0.997
                         self.actor_loss_grad_norm_ema = self.actor_loss_grad_norm_ema * ema + actor_loss_grad_norm * (1 - ema)
-                        if self._n_updates % 24000 == 0:    
+                        if self._n_updates % 100000 == 0:
+                            print(actions.shape)
+                            print(actions[0].cpu().detach())
+                            print([round(self.policy.best_action_count[i], 2) for i in range(self.num_ideas)])
                             print(f"Actor Loss Grad Norm: {self.actor_loss_grad_norm_ema}")
                 self.actor.optimizer.step()
 
@@ -260,26 +270,7 @@ class TD3B(OffPolicyAlgorithm):
                 # Copy running stats, see GH issue #996
                 polyak_update(self.critic_batch_norm_stats, self.critic_batch_norm_stats_target, 1.0)
                 polyak_update(self.actor_batch_norm_stats, self.actor_batch_norm_stats_target, 1.0)
-            elif self._n_updates % self.policy_delay == 1 and self.alternate == True:
-                actions = self.actor(replay_data.observations)
-                contrastive_actor_loss = self.calculate_contrastive_loss(actions)
-                actor_losses.append(contrastive_actor_loss.item())
-                actor_loss = contrastive_actor_loss * self.contrastive_loss_mult
-                actor_loss_grad_norm = 0
-                self.actor.optimizer.zero_grad()
-                actor_loss.backward()
-                if self.grad_printout:
-                    if self._n_updates % 40 == 1:
-                        for param in self.actor.parameters():
-                            if param.grad is not None:
-                                actor_loss_grad_norm += param.grad.data.norm(2).item()**2
 
-                        actor_loss_grad_norm = (actor_loss_grad_norm ** 0.5) / len(list(self.actor.parameters()))
-                        ema = 0.997
-                        self.contrastive_loss_grad_norm_ema = self.contrastive_loss_grad_norm_ema * ema + actor_loss_grad_norm * (1 - ema)
-                        if self._n_updates % 24000 == 1:    
-                            print(f"Contrastive Loss Grad Norm: {self.contrastive_loss_grad_norm_ema}")
-                self.actor.optimizer.step()
         self.logger.record("train/n_updates", self._n_updates, exclude="tensorboard")
         if len(actor_losses) > 0:
             self.logger.record("train/actor_loss", np.mean(actor_losses))
@@ -323,3 +314,36 @@ class TD3B(OffPolicyAlgorithm):
         rank_tensor.scatter_(1, idxs, rank_weights)
         values = (values * rank_tensor) / rank_tensor.mean(dim=0, keepdim=True)
         return values
+    def random_replace(self, input_tensor):
+        #thanks gpt-4
+        """
+        Randomly replace X% of the elements in the input tensor with random numbers between 0 and N.
+        
+        Parameters:
+        - input_tensor (torch.Tensor): 1D tensor of shape [bs] containing integers from 0 to N
+        - N (int): The upper limit for random replacement
+        - X (float): The percentage of elements to replace
+        
+        Returns:
+        - torch.Tensor: The modified tensor
+        """
+        # Ensure the input tensor is 1D
+        N = self.num_ideas
+        X = 1 - self.argmax_fraction
+        if len(input_tensor.shape) != 1:
+            raise ValueError("Input tensor must be 1D.")
+        
+        # Calculate the number of elements to replace
+        num_elements = input_tensor.shape[0]
+        num_to_replace = int(num_elements * X)
+        
+        # Randomly select indices to replace
+        indices_to_replace = th.randperm(num_elements)[:num_to_replace].to(self.device)
+        
+        # Generate random replacements
+        random_replacements = th.randint(0, N, (num_to_replace,)).to(self.device)
+        output_tensor = input_tensor.clone()
+        # Perform the replacement
+        output_tensor[indices_to_replace] = random_replacements
+        
+        return output_tensor

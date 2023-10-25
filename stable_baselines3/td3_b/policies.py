@@ -246,7 +246,7 @@ class TD3BPolicy(BasePolicy):
             squash_output=True,
             normalize_images=normalize_images,
         )
-
+        self.best_action_count = [0 for i in range(num_ideas)]
         # Default network architecture, from the original paper
         if net_arch is None:
             if features_extractor_class == NatureCNN:
@@ -354,6 +354,8 @@ class TD3BPolicy(BasePolicy):
         if random.uniform(0, 1) > self.epsilon:
             values = self.critic.q1_forward(observation, actions, idx=1)
             max_index = values.argmax(dim=1)
+            self.best_action_count = [self.best_action_count[i] * 0.999 for i in range(len(self.best_action_count))]
+            self.best_action_count[max_index] += 0.001
         else:
             max_index = random.randint(0, actions.shape[1] - 1)
         best_action = actions[self.idxrange, max_index]
