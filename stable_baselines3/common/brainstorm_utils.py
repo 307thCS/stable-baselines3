@@ -20,9 +20,13 @@ class SkipFrameWrapper(Wrapper):
     def __init__(self, env, num_steps = 2):
         super().__init__(env)
         self.num_steps = num_steps
+        self.total_steps = 0
     def step(self, action):
+        total_reward = 0
         for i in range(self.num_steps):
+            self.total_steps += 1
             obs, reward, terminated, truncated, info = self.env.step(action)
+            total_reward += reward
             if terminated == True or truncated == True:
-                return obs, reward, terminated, truncated, info
-        return obs, reward, terminated, truncated, info
+                return obs, total_reward, terminated, truncated, info
+        return obs, total_reward, terminated, truncated, info
