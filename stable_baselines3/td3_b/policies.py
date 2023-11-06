@@ -351,6 +351,8 @@ class TD3BPolicy(BasePolicy):
         # Note: the deterministic deterministic parameter is ignored in the case of TD3.
         #   Predictions are always deterministic.
         actions = self.actor(observation)
+        best_action = actions[self.idxrange, -1]
+        return best_action
         if random.uniform(0, 1) > self.epsilon:
             values = self.critic.q1_forward(observation, actions, idx=1)
             max_index = values.argmax(dim=1)

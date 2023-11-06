@@ -204,7 +204,7 @@ class TD3B(OffPolicyAlgorithm):
                 #noise = noise.clamp(-self.target_noise_clip, self.target_noise_clip)
                 next_action_candidates = self.actor_target(replay_data.next_observations)
                 candidate_values = self.critic_target.q1_forward(replay_data.next_observations, next_action_candidates, idx = 1).squeeze(dim=2)
-                max_indexes = candidate_values.argmax(dim=1)
+                max_indexes = th.ones_like(candidate_values.argmax(dim=1)) * -1
                 next_actions = next_action_candidates[self.idxrange, max_indexes]
                 #if self.argmax_fraction < 1:
                 #    candidate_indexes = self.random_replace(candidate_indexes)
@@ -304,7 +304,7 @@ class TD3B(OffPolicyAlgorithm):
         return state_dicts, []
     def calculate_contrastive_loss(self, actions):
         bs = actions.shape[0]
-        distances = (abs((actions.unsqueeze(dim=1) - actions.unsqueeze(dim=2).detach()))).mean(dim=3)
+        distances = (abs(actions.unsqueeze(dim=1) - actions.unsqueeze(dim=2).detach())).mean(dim=3)
         #distances = distances.flatten(start_dim=1)[:, 1:].view(bs, self.num_ideas-1, self.num_ideas+1)[:, :,:-1].reshape(bs, self.num_ideas, self.num_ideas-1)#remove diagonals
         losses = (th.nn.functional.relu(self.start_points - distances) * self.tril) ** 2 
         return losses.mean()
