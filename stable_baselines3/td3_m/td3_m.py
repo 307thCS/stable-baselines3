@@ -143,7 +143,7 @@ class TD3M(OffPolicyAlgorithm):
         self.start_epsilon, self.min_epsilon, self.min_epsilon_by = start_epsilon, min_epsilon, min_epsilon_by
         self.tril = th.ones(self.num_ideas, self.num_ideas).float().to(self.device).tril(diagonal=-1)
         self.start_points = th.ones(self.num_ideas)[None, :, None].float().to(self.device)
-        #self.start_points[:, 0] = 0
+        self.start_points[:, 0] = 0
         if _init_setup_model:
             self._setup_model()
     def _setup_model(self) -> None:
@@ -260,8 +260,7 @@ class TD3M(OffPolicyAlgorithm):
         state_dicts = ["policy", "actor.optimizer", "critic.optimizer"]
         return state_dicts, []
     def calculate_contrastive_loss(self, actions):
-        #note: the last action is the one that receives no contrastive loss. The first action (index 0) is the one that receives contrastive loss away from all other actions.
         bs = actions.shape[0]
-        distances = (abs(actions.unsqueeze(dim=1).detach() - actions.unsqueeze(dim=2))).mean(dim=3)
+        distances = (abs(actions.unsqueeze(dim=1) - actions.unsqueeze(dim=2).detach())).mean(dim=3)
         losses = (th.nn.functional.relu(self.start_points - distances) * self.tril) ** 2 
         return losses.mean()

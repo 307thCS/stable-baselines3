@@ -90,9 +90,6 @@ class BIT(OffPolicyAlgorithm):
         tau: float = 0.005,
         gamma: float = 0.99,
         contrastive_loss_mult: int = 2,
-        max_rank: float = 2.,
-        moe_bool: bool = False,
-        alt_start_points: bool = True,
         policy_update: int = 500,
         policy_temp: float = 1.,
         printout_interval: int = 50000,
@@ -103,12 +100,13 @@ class BIT(OffPolicyAlgorithm):
         replay_buffer_kwargs: Optional[Dict[str, Any]] = None,
         optimize_memory_usage: bool = False,
         policy_delay: int = 2,
+        actor_delay: int = 2,
         grad_printout: bool = False,
         target_policy_noise: float = 0.2,
         target_noise_clip: float = 0.5,
         stats_window_size: int = 100,
         tensorboard_log: Optional[str] = None,
-        policy_kwargs: Optional[Dict[str, Any]] = {"num_ideas": 8, "idea_squish_factor": 0},
+        policy_kwargs: Optional[Dict[str, Any]] = {"num_ideas": 8},
         verbose: int = 0,
         seed: Optional[int] = None,
         device: Union[th.device, str] = "auto",
@@ -140,7 +138,7 @@ class BIT(OffPolicyAlgorithm):
             support_multi_env=True,
         )
         self.grad_printout = grad_printout
-        self.policy_delay = policy_delay
+        self.policy_delay, self.actor_delay = policy_delay, actor_delay
         self.target_noise_clip = target_noise_clip
         self.target_policy_noise = target_policy_noise
         self.idxrange = th.arange(batch_size).to(self.device)
@@ -151,16 +149,9 @@ class BIT(OffPolicyAlgorithm):
         #self.inverse_eye = (1 - th.eye(self.num_ideas)).to(self.device)
         #self.tril = self.inverse_eye
         self.tril = th.ones(self.num_ideas, self.num_ideas).float().to(self.device).tril(diagonal=-1)
-        self.rank_weights =  th.linspace(1, max_rank, self.num_ideas)[None, :].expand(batch_size, -1).to(self.device)
-        if alt_start_points == True:
-            self.start_points = th.ones(self.num_ideas)[None, :, None].float().to(self.device)
-            self.start_points[:, 0] = 0
-        else:
-            self.start_points = th.linspace(0, 2, self.num_ideas)[None, :, None].to(self.device) #used for contrastive loss, determines at what distance it begins applying CL
-        if max_rank == 0 or max_rank == 1:
-            self.moe_bool = False
-        else:
-            self.moe_bool = moe_bool
+    
+        self.start_points = th.ones(self.num_ideas)[None, :, None].float().to(self.device)
+        
         self.actor_loss_grad_norm_ema = 0
         self.contrastive_loss_grad_norm_ema = 0
         if _init_setup_model:
@@ -227,13 +218,11 @@ class BIT(OffPolicyAlgorithm):
 
             # Delayed policy updates
             
-            if self._n_updates % self.policy_delay == 0:
+            if self._n_updates % self.actor_delay == 0:
                 # Compute actor loss
                 actions = self.actor(replay_data.observations)
                 base_values = self.critic.q1_forward(replay_data.observations, actions)
                 values = -base_values.squeeze(dim=2)
-                if self.moe_bool:
-                    values = self.moe_loss_adjust(values, self.rank_weights)
                 actor_loss = values.mean()
                 actor_losses.append(actor_loss.item())
                 if self.contrastive_loss_mult > 0:
@@ -256,12 +245,14 @@ class BIT(OffPolicyAlgorithm):
                         if self._n_updates % 24000 == 0:    
                             print(f"Actor Loss Grad Norm: {self.actor_loss_grad_norm_ema}")
                 self.actor.optimizer.step()
-                
-                base_logits = self.policy_net(replay_data.observations, actions.detach())
+            if self._n_updates % self.policy_delay == 0:
                 with th.no_grad():
+                    if self._n_updates % self.actor_delay != 0:
+                        actions = self.actor(replay_data.observations)
                     old_logits = self.policy_net_target(replay_data.observations, actions.detach())
                     base_values_2 = self.critic.q1_forward(replay_data.observations, actions, idx = 1).detach()
                     target_policy = self.adjust_policy(F.softmax(old_logits, dim=1), base_values_2.detach())
+                base_logits = self.policy_net(replay_data.observations, actions.detach())
                 policy_loss = self.log_loss(base_logits, target_policy.detach())
                 regularization_loss = self.regularization_loss(base_logits)
                 policy_loss = policy_loss + regularization_loss
@@ -278,16 +269,19 @@ class BIT(OffPolicyAlgorithm):
                     print("log loss:", policy_loss - regularization_loss)
                     print("regularization loss:", regularization_loss)
                     print("logits:", [round(i, 2) for i in old_logits[0].detach().squeeze().cpu().tolist()])
-                    old_probs = F.softmax(old_logits, dim=1)
+                    old_probs = F.softmax(old_logits, dim=1) 
                     old_policy_slice = old_probs[0].detach().squeeze().cpu()
+                    prob_max = old_policy_slice.argmax()
                     self.print_percentages("old policy:   ", old_policy_slice)
                     target_policy_slice = target_policy[0].detach().squeeze().cpu()
                     self.print_percentages("target policy:", target_policy_slice)
                     adjustments = target_policy_slice - old_policy_slice
                     self.print_percentages("adjustments:  ", adjustments, digits=2)
                     a_values = base_values_2 - (base_values_2 * old_probs).sum(dim=1, keepdim=True)
+                    value_max = a_values[0].argmax()
                     moves_and_values = th.cat((actions[0], a_values[0]), dim=1).detach().squeeze().cpu()
                     self.print_matrix("actions:", moves_and_values, digits=2)
+                    print("highest prob and value index:", prob_max, value_max)
                     print("")
             if self._n_updates % self.policy_update == 0:
                 self.policy_net_target.load_state_dict(self.policy_net.state_dict())
@@ -323,16 +317,9 @@ class BIT(OffPolicyAlgorithm):
         return state_dicts, []
     def calculate_contrastive_loss(self, actions):
         bs = actions.shape[0]
-        distances = (abs((actions.unsqueeze(dim=1) - actions.unsqueeze(dim=2).detach()))).mean(dim=3)
-        #distances = distances.flatten(start_dim=1)[:, 1:].view(bs, self.num_ideas-1, self.num_ideas+1)[:, :,:-1].reshape(bs, self.num_ideas, self.num_ideas-1)#remove diagonals
+        distances = (abs(actions.unsqueeze(dim=1).detach() - actions.unsqueeze(dim=2))).mean(dim=3)
         losses = (th.nn.functional.relu(self.start_points - distances) * self.tril) ** 2 
         return losses.mean()
-    def moe_loss_adjust(self, values, rank_weights):
-        idxs = values.argsort(dim=1)
-        rank_tensor = th.empty_like(rank_weights).to(self.device).detach()
-        rank_tensor.scatter_(1, idxs, rank_weights)
-        values = (values * rank_tensor) / rank_tensor.mean(dim=0, keepdim=True)
-        return values
     def adjust_policy(self, old_probs, values):
         a_values = values - (values * old_probs).sum(dim=1, keepdim=True)
         adjustments = a_values * self.policy_temp
