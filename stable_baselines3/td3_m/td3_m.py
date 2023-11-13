@@ -143,7 +143,6 @@ class TD3M(OffPolicyAlgorithm):
         self.start_epsilon, self.min_epsilon, self.min_epsilon_by = start_epsilon, min_epsilon, min_epsilon_by
         self.tril = th.ones(self.num_ideas, self.num_ideas).float().to(self.device).tril(diagonal=-1)
         self.start_points = th.ones(self.num_ideas)[None, :, None].float().to(self.device)
-        self.start_points[:, 0] = 0
         if _init_setup_model:
             self._setup_model()
     def _setup_model(self) -> None:
@@ -209,7 +208,7 @@ class TD3M(OffPolicyAlgorithm):
                 # Compute actor loss
                 actions = self.actor(replay_data.observations)
                 #actions.retain_grad()
-                values = -self.critic.q1_forward(replay_data.observations, actions).squeeze(dim=2)
+                values = -self.critic.q1_forward(replay_data.observations, actions).squeeze(dim=2)#-actions * 0.002
                 actor_loss = values.mean()
                 actor_losses.append(actor_loss.item())
                 if self.contrastive_loss_mult > 0:
@@ -226,8 +225,8 @@ class TD3M(OffPolicyAlgorithm):
                 # Copy running stats, see GH issue #996
                 polyak_update(self.critic_batch_norm_stats, self.critic_batch_norm_stats_target, 1.0)
                 polyak_update(self.actor_batch_norm_stats, self.actor_batch_norm_stats_target, 1.0)
-#                if self._n_updates % 10000 == 0:
-#                    print(actions.mean(dim=0).detach().cpu())
+                #if self._n_updates % 10000 == 0:
+                #    print(actions.mean(dim=0).detach().cpu())
         self.logger.record("train/n_updates", self._n_updates, exclude="tensorboard")
         if len(actor_losses) > 0:
             self.logger.record("train/actor_loss", np.mean(actor_losses))

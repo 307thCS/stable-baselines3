@@ -149,9 +149,9 @@ class BIT(OffPolicyAlgorithm):
         #self.inverse_eye = (1 - th.eye(self.num_ideas)).to(self.device)
         #self.tril = self.inverse_eye
         self.tril = th.ones(self.num_ideas, self.num_ideas).float().to(self.device).tril(diagonal=-1)
-    
+
         self.start_points = th.ones(self.num_ideas)[None, :, None].float().to(self.device)
-        
+        self.start_points[:, 0] = 0
         self.actor_loss_grad_norm_ema = 0
         self.contrastive_loss_grad_norm_ema = 0
         if _init_setup_model:
@@ -249,12 +249,15 @@ class BIT(OffPolicyAlgorithm):
                 with th.no_grad():
                     if self._n_updates % self.actor_delay != 0:
                         actions = self.actor(replay_data.observations)
+                    noise = actions.clone().data.normal_(0, self.target_policy_noise)
+                    noise = noise.clamp(-self.target_noise_clip, self.target_noise_clip)
+                    actions = (actions + noise).clamp(-1, 1)
                     old_logits = self.policy_net_target(replay_data.observations, actions.detach())
                     base_values_2 = self.critic.q1_forward(replay_data.observations, actions, idx = 1).detach()
                     target_policy = self.adjust_policy(F.softmax(old_logits, dim=1), base_values_2.detach())
                 base_logits = self.policy_net(replay_data.observations, actions.detach())
                 policy_loss = self.log_loss(base_logits, target_policy.detach())
-                regularization_loss = self.regularization_loss(base_logits)
+                regularization_loss = self.regularization_loss_3(base_logits)
                 policy_loss = policy_loss + regularization_loss
                 self.policy_net.optimizer.zero_grad()
                 policy_loss.backward()
@@ -317,7 +320,7 @@ class BIT(OffPolicyAlgorithm):
         return state_dicts, []
     def calculate_contrastive_loss(self, actions):
         bs = actions.shape[0]
-        distances = (abs(actions.unsqueeze(dim=1).detach() - actions.unsqueeze(dim=2))).mean(dim=3)
+        distances = (abs(actions.unsqueeze(dim=1) - actions.unsqueeze(dim=2).detach())).mean(dim=3)
         losses = (th.nn.functional.relu(self.start_points - distances) * self.tril) ** 2 
         return losses.mean()
     def adjust_policy(self, old_probs, values):
@@ -337,6 +340,9 @@ class BIT(OffPolicyAlgorithm):
         return loss
     def regularization_loss_2(self, logits):
         loss = (logits ** 2).mean() / 1000
+        return loss
+    def regularization_loss_3(self, logits):
+        loss = abs(logits).mean() / 1000
         return loss
     def print_percentages(self, name, probs, digits=1):
         str_probs = [str(round(probs[i].tolist() * 100, digits)) + "%" for i in range(probs.shape[0])]
