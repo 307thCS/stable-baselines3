@@ -213,7 +213,8 @@ class TD3M(OffPolicyAlgorithm):
                     noise = noise.clamp(-self.target_noise_clip, self.target_noise_clip)
                     next_actions = (next_actions + noise).clamp(-1, 1)
                     next_q_values = th.cat(self.critic_target(replay_data.next_observations, next_actions), dim=2)
-                    next_q_values, _ = th.min(next_q_values, dim=1, keepdim=True)
+                    next_q_values, _ = th.min(next_q_values, dim=2, keepdim=True)
+                    next_q_values = next_q_values.mean(dim=1)
                     
                 target_q_values = replay_data.rewards + (1 - replay_data.dones) * self.gamma * next_q_values
 
