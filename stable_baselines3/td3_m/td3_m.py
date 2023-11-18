@@ -207,7 +207,8 @@ class TD3M(OffPolicyAlgorithm):
                 
                 elif self.target_type == 3:
                     candidate_values = self.critic_target(replay_data.next_observations, next_action_candidates)
-                    max_indexes_1, max_indexes_2 = candidate_values[0].argmax(dim=1).squeeze(dim=2), candidate_values[1].argmax(dim=1).squeeze(dim=2)
+                    #print(candidate_values[0].shape, self.critic_target.q1_forward(replay_data.next_observations, next_action_candidates, idx = 1).shape)
+                    max_indexes_1, max_indexes_2 = candidate_values[0].squeeze(dim=2).argmax(dim=1), candidate_values[1].squeeze(dim=2).argmax(dim=1)
                     next_actions = th.stack((next_action_candidates[self.idxrange, max_indexes_1], next_action_candidates[self.idxrange, max_indexes_2]), dim=1)
                     noise = next_actions.clone().data.normal_(0, self.target_policy_noise)
                     noise = noise.clamp(-self.target_noise_clip, self.target_noise_clip)
