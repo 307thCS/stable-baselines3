@@ -108,6 +108,9 @@ class TD3M(OffPolicyAlgorithm):
         start_epsilon: float = 1.,
         min_epsilon: float = 0.,
         min_epsilon_by: float = 0.5,
+        argmax_fraction: float = 0.5,
+        cl_type: int = 0,
+        target_type: int = 0,
     ):
         super().__init__(
             policy,
@@ -134,6 +137,8 @@ class TD3M(OffPolicyAlgorithm):
             supported_action_spaces=(spaces.Box,),
             support_multi_env=True,
         )
+        self.argmax_fraction = argmax_fraction
+        self.cl_type, self.target_type = cl_type, target_type
         self.policy_delay = policy_delay
         self.target_noise_clip = target_noise_clip
         self.target_policy_noise = target_policy_noise
@@ -175,18 +180,41 @@ class TD3M(OffPolicyAlgorithm):
             self._n_updates += 1
             # Sample replay buffer
             replay_data = self.replay_buffer.sample(batch_size, env=self._vec_normalize_env)  # type: ignore[union-attr]
-
+            
             with th.no_grad():
                 # Select action according to policy and add clipped noise
                 next_action_candidates = self.actor_target(replay_data.next_observations)
-                candidate_values = self.critic_target.q1_forward(replay_data.next_observations, next_action_candidates, idx = 1).squeeze(dim=2)
-                max_indexes = candidate_values.argmax(dim=1)
-                next_actions = next_action_candidates[self.idxrange, max_indexes]
-                noise = next_actions.clone().data.normal_(0, self.target_policy_noise)
-                noise = noise.clamp(-self.target_noise_clip, self.target_noise_clip)
-                next_actions = (next_actions + noise).clamp(-1, 1)
-                next_q_values = th.cat(self.critic_target(replay_data.next_observations, next_actions), dim=1)
-                next_q_values, _ = th.min(next_q_values, dim=1, keepdim=True)
+                
+                if self.target_type == 1:
+                    candidate_values = self.critic_target.q1_forward(replay_data.next_observations, next_action_candidates, idx = 1).squeeze(dim=2)
+                    max_indexes = candidate_values.argmax(dim=1)
+                    next_actions = next_action_candidates[self.idxrange, max_indexes]
+                    noise = next_actions.clone().data.normal_(0, self.target_policy_noise)
+                    noise = noise.clamp(-self.target_noise_clip, self.target_noise_clip)
+                    next_actions = (next_actions + noise).clamp(-1, 1)
+                    next_q_values = th.cat(self.critic_target(replay_data.next_observations, next_actions), dim=1)
+                    next_q_values, _ = th.min(next_q_values, dim=1, keepdim=True)
+                
+                elif self.target_type == 2:
+                    candidate_values = self.critic_target.q1_forward(replay_data.next_observations, next_action_candidates, idx = 1).squeeze(dim=2)
+                    max_indexes = candidate_values.argmax(dim=1)
+                    noise = next_action_candidates.clone().data.normal_(0, self.target_policy_noise)
+                    noise = noise.clamp(-self.target_noise_clip, self.target_noise_clip)
+                    next_action_candidates = (next_action_candidates + noise).clamp(-1, 1)
+                    next_q_values = th.cat(self.critic_target(replay_data.next_observations, next_action_candidates), dim=2)
+                    next_q_values, _ = th.min(next_q_values, dim=2, keepdim=True)
+                    next_q_values = next_q_values[self.idxrange, max_indexes] * self.argmax_fraction + next_q_values.mean(dim=1) * (1 - self.argmax_fraction)
+                
+                elif self.target_type == 3:
+                    candidate_values = self.critic_target(replay_data.next_observations, next_action_candidates, idx = 1).squeeze(dim=2)
+                    max_indexes_1, max_indexes_2 = candidate_values[0].argmax(dim=1), candidate_values[1].argmax(dim=1)
+                    next_actions = th.stack((next_action_candidates[self.idxrange, max_indexes_1], next_action_candidates[self.idxrange, max_indexes_2]), dim=1)
+                    noise = next_actions.clone().data.normal_(0, self.target_policy_noise)
+                    noise = noise.clamp(-self.target_noise_clip, self.target_noise_clip)
+                    next_actions = (next_actions + noise).clamp(-1, 1)
+                    next_q_values = th.cat(self.critic_target(replay_data.next_observations, next_actions), dim=2)
+                    next_q_values, _ = th.min(next_q_values, dim=1, keepdim=True)
+                    
                 target_q_values = replay_data.rewards + (1 - replay_data.dones) * self.gamma * next_q_values
 
             # Get current Q-values estimates for each critic network
@@ -212,7 +240,10 @@ class TD3M(OffPolicyAlgorithm):
                 actor_loss = values.mean()
                 actor_losses.append(actor_loss.item())
                 if self.contrastive_loss_mult > 0:
-                    contrastive_actor_loss = self.calculate_contrastive_loss(actions)
+                    if self.cl_type == 1:
+                        contrastive_actor_loss = self.calculate_contrastive_loss_1(actions)
+                    elif self.cl_type == 2:
+                        contrastive_actor_loss = self.calculate_contrastive_loss_2(actions)
                     actor_losses.append(contrastive_actor_loss.item())
                     actor_loss += contrastive_actor_loss * self.contrastive_loss_mult
                 # Optimize the actor
@@ -258,8 +289,13 @@ class TD3M(OffPolicyAlgorithm):
     def _get_torch_save_params(self) -> Tuple[List[str], List[str]]:
         state_dicts = ["policy", "actor.optimizer", "critic.optimizer"]
         return state_dicts, []
-    def calculate_contrastive_loss(self, actions):
+    def calculate_contrastive_loss_1(self, actions):
         bs = actions.shape[0]
         distances = (abs(actions.unsqueeze(dim=1) - actions.unsqueeze(dim=2).detach())).mean(dim=3)
+        losses = (th.nn.functional.relu(self.start_points - distances) * self.tril) ** 2 
+        return losses.mean()
+    def calculate_contrastive_loss_2(self, actions):
+        bs = actions.shape[0]
+        distances = ((actions.unsqueeze(dim=1) - actions.unsqueeze(dim=2).detach()) ** 2 + 1e-7).mean(dim=3) ** 0.5
         losses = (th.nn.functional.relu(self.start_points - distances) * self.tril) ** 2 
         return losses.mean()

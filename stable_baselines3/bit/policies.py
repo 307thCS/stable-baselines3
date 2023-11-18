@@ -217,7 +217,6 @@ class Policy(BaseModel):
             features_extractor=features_extractor,
             normalize_images=normalize_images,
         )
-
         action_dim = get_action_dim(self.action_space)
 
         self.share_features_extractor = share_features_extractor
