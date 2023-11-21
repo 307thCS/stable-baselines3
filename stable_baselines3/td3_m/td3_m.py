@@ -109,8 +109,9 @@ class TD3M(OffPolicyAlgorithm):
         min_epsilon: float = 0.,
         min_epsilon_by: float = 0.5,
         argmax_fraction: float = 0.5,
-        cl_type: int = 0,
-        target_type: int = 0,
+        cl_type: int = 2,
+        target_type: int = 1,
+        decrement: float = 0.25,
     ):
         super().__init__(
             policy,
@@ -145,6 +146,9 @@ class TD3M(OffPolicyAlgorithm):
         self.idxrange = th.arange(batch_size).to(self.device)
         self.contrastive_loss_mult = contrastive_loss_mult
         self.num_ideas = policy_kwargs["num_ideas"]
+        minimum = 1 - decrement * (self.num_ideas - 1)
+        self.rank_weights = th.relu(th.linspace(minimum, 1, self.num_ideas)[None, :].expand(batch_size, self.num_ideas)).to(self.device)
+        self.rank_weights = self.rank_weights / self.rank_weights.sum(dim=1, keepdim=True)
         self.start_epsilon, self.min_epsilon, self.min_epsilon_by = start_epsilon, min_epsilon, min_epsilon_by
         self.tril = th.ones(self.num_ideas, self.num_ideas).float().to(self.device).tril(diagonal=-1)
         self.start_points = th.ones(self.num_ideas)[None, :, None].float().to(self.device)
@@ -216,7 +220,24 @@ class TD3M(OffPolicyAlgorithm):
                     next_q_values = th.cat(self.critic_target(replay_data.next_observations, next_actions), dim=2)
                     next_q_values, _ = th.min(next_q_values, dim=2, keepdim=True)
                     next_q_values = next_q_values.mean(dim=1)
-                    
+                elif self.target_type == 4:
+                    candidate_values = self.critic_target.q1_forward(replay_data.next_observations, next_action_candidates, idx = 1).squeeze(dim=2)
+                    idxs = candidate_values.argsort(dim=1).to(self.device)
+                    weight_tensor = th.empty_like(self.rank_weights).to(self.device)
+                    weight_tensor = weight_tensor.scatter_(1, idxs, self.rank_weights).unsqueeze(dim=2)
+                    noise = next_action_candidates.clone().data.normal_(0, self.target_policy_noise)
+                    noise = noise.clamp(-self.target_noise_clip, self.target_noise_clip)
+                    next_action_candidates = (next_action_candidates + noise).clamp(-1, 1)
+                    next_q_values = th.cat(self.critic_target(replay_data.next_observations, next_action_candidates), dim=2)
+                    next_q_values, _ = th.min(next_q_values, dim=2, keepdim=True)
+                    next_q_values = (next_q_values * weight_tensor).sum(dim=1)
+                    '''if self._n_updates == 1:
+                        print("candidate_values:", candidate_values[0])
+                        print("idxs:", idxs[0])
+                        print("weight_tensor:", weight_tensor[0])
+                        print("noise:", noise[0])
+                        print("next_action_candidates:", next_action_candidates[0])
+                        print("next_q_values:", next_q_values[0])'''
                 target_q_values = replay_data.rewards + (1 - replay_data.dones) * self.gamma * next_q_values
 
             # Get current Q-values estimates for each critic network
@@ -293,11 +314,17 @@ class TD3M(OffPolicyAlgorithm):
         return state_dicts, []
     def calculate_contrastive_loss_1(self, actions):
         bs = actions.shape[0]
-        distances = (abs(actions.unsqueeze(dim=1) - actions.unsqueeze(dim=2).detach())).mean(dim=3)
+        distances = (abs(actions.unsqueeze(dim=2) - actions.unsqueeze(dim=1).detach())).mean(dim=3)
         losses = (th.nn.functional.relu(self.start_points - distances) * self.tril) ** 2 
         return losses.mean()
     def calculate_contrastive_loss_2(self, actions):
         bs = actions.shape[0]
-        distances = ((actions.unsqueeze(dim=1) - actions.unsqueeze(dim=2).detach()) ** 2 + 1e-7).mean(dim=3) ** 0.5
+        distances = ((actions.unsqueeze(dim=2) - actions.unsqueeze(dim=1).detach()) ** 2 + 1e-7).mean(dim=3) ** 0.5
         losses = (th.nn.functional.relu(self.start_points - distances) * self.tril) ** 2 
         return losses.mean()
+    def target_adjust(values, rank_weights):
+        idxs = values.argsort(dim=1)
+        rank_tensor = th.empty_like(rank_weights).to(values.device).detach()
+        rank_tensor.scatter_(1, idxs, rank_weights)
+        values = (values * rank_tensor)
+        return values
